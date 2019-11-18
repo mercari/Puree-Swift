@@ -107,7 +107,7 @@ open class BufferedOutput: Output {
     }
 
     open func write(_ chunk: Chunk, completion: @escaping (WriteResult) -> Void) {
-        completion(.success)
+        completion(.failureNonRetryable)
     }
 
     open var storageGroup: String {

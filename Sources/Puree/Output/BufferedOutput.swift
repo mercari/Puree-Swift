@@ -177,11 +177,6 @@ open class BufferedOutput: Output {
         }
     }
 
-    private func pruneLogStorage() {
-        dispatchPrecondition(condition: .onQueue(readWriteQueue))
-
-    }
-
     private func flush() {
         dispatchPrecondition(condition: .onQueue(readWriteQueue))
 

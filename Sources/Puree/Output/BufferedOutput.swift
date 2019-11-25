@@ -6,7 +6,7 @@ open class BufferedOutput: Output {
         case success
         /// Schedule retries based on the delay function
         case failureRetryable
-        /// Schedule retries based on the delay function, but only after the next time this output is resumed.
+        /// Retry immediately AFTER the next time this output is resumed, regardless of retryLimit
         case failureRetryAfterNextResume
         /// Permanent failure, no need to retry.
         case failureNonRetryable
@@ -44,8 +44,11 @@ open class BufferedOutput: Output {
         public var logEntryCountLimit: Int
         public var flushInterval: TimeInterval
         public var retryLimit: Int
+        public var dropLogEntriesOlderThan: TimeInterval
 
-        public static let `default` = Configuration(logEntryCountLimit: 5, flushInterval: 10, retryLimit: 3)
+        public static let `default` = Configuration(logEntryCountLimit: 5, flushInterval: 10, retryLimit: 3, dropLogEntriesOlderThan: Configuration.twoDays)
+
+        private static let twoDays: TimeInterval = 3600*24*2
     }
 
     public let tagPattern: TagPattern
@@ -141,21 +144,42 @@ open class BufferedOutput: Output {
         }
     }
 
+    private func splitIntoKeepAndDrop(logs: Set<LogEntry>) -> (keep: Set<LogEntry>, drop: Set<LogEntry>) {
+        let keep = logs.filter {
+            return currentDate.timeIntervalSince($0.date) < configuration.dropLogEntriesOlderThan
+        }
+        return (keep, logs.subtracting(keep))
+    }
+
     private func reloadLogStore() {
         readWriteQueue.sync {
             buffer.removeAll()
             let semaphore = DispatchSemaphore(value: 0)
             logStore.retrieveLogs(of: storageGroup) { logs in
-                let filteredLogs = logs.filter { log in
+                let (keep, drop) = self.splitIntoKeepAndDrop(logs: logs)
+                let filteredLogs = keep.filter { log in
                     return !currentWritingChunks.contains { chunk in
                         return chunk.logs.contains(log)
                     }
                 }
+
                 buffer = buffer.union(filteredLogs)
-                semaphore.signal()
+
+                if drop.isEmpty {
+                    semaphore.signal()
+                } else {
+                    logStore.remove(drop, from: storageGroup) {
+                        semaphore.signal()
+                    }
+                }
             }
             semaphore.wait()
         }
+    }
+
+    private func pruneLogStorage() {
+        dispatchPrecondition(condition: .onQueue(readWriteQueue))
+
     }
 
     private func flush() {

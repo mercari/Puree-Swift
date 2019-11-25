@@ -6,6 +6,10 @@ private func makeLog() -> LogEntry {
     return LogEntry(tag: "foo", date: Date())
 }
 
+private func makeOutdatedLog() -> LogEntry {
+    return LogEntry(tag: "foo", date: Date(timeIntervalSinceNow: -60))
+}
+
 class TestingBufferedOutput: BufferedOutput {
     var writeResult: WriteResult = .success
     fileprivate(set) var calledWriteCount: Int = 0
@@ -60,6 +64,26 @@ class BufferedOutputTests: XCTestCase {
         output.waitUntilCurrentQueuedJobFinished()
 
         XCTAssertEqual(logStore.logs(for: "pv_TestingBufferedOutput").count, 0)
+        XCTAssertEqual(output.calledWriteCount, 1)
+    }
+
+    func testBufferedOutputWithOutdatedLogs() {
+        output.writeResult = .failureRetryAfterNextResume
+        output.configuration.logEntryCountLimit = 10
+        output.configuration.flushInterval = 10
+        output.configuration.dropLogEntriesOlderThan = 30
+
+        let keptLogs: Set<LogEntry> = Set((0..<5).map { _ in makeLog() })
+        let deletedLogs: Set<LogEntry> = Set((0..<5).map { _ in makeOutdatedLog() })
+        logStore.add(keptLogs.union(deletedLogs), for: "pv_TestingBufferedOutput", completion: nil)
+        XCTAssertEqual(logStore.logs(for: "pv_TestingBufferedOutput").count, 10)
+        XCTAssertEqual(output.calledWriteCount, 0)
+
+        output.resume()
+        output.waitUntilCurrentQueuedJobFinished()
+
+        XCTAssertEqual(logStore.logs(for: "pv_TestingBufferedOutput").count, 5)
+        XCTAssertEqual(logStore.logs(for: "pv_TestingBufferedOutput"), keptLogs)
         XCTAssertEqual(output.calledWriteCount, 1)
     }
 
@@ -141,6 +165,33 @@ class BufferedOutputTests: XCTestCase {
         }
         wait(for: [expectation], timeout: 5.0)
         XCTAssertEqual(output.calledWriteCount, 4)
+    }
+
+    func testRetryAfterNextResume() {
+        output.writeResult = .failureRetryAfterNextResume
+        output.configuration.logEntryCountLimit = 10
+        output.configuration.retryLimit = 1
+        XCTAssertEqual(output.calledWriteCount, 0)
+        for _ in 0..<10 {
+            output.emit(log: makeLog())
+        }
+
+        output.waitUntilCurrentQueuedJobFinished()
+        XCTAssertEqual(output.calledWriteCount, 1)
+
+        output.writeCallback = {
+            XCTFail("retry should not have been attempted before resume")
+        }
+        sleep(2)
+
+        // Now test resume.
+        XCTAssertEqual(output.calledWriteCount, 1)
+        XCTAssertEqual(logStore.logs(for: "pv_TestingBufferedOutput").count, 10)
+        output.writeResult = .success
+        output.writeCallback = nil
+        output.resume()
+        output.waitUntilCurrentQueuedJobFinished()
+        XCTAssertEqual(output.calledWriteCount, 2)
     }
 
     func testParallelWrite() {
@@ -239,6 +290,34 @@ class BufferedOutputAsyncTests: XCTestCase {
         XCTAssertEqual(output.calledWriteCount, 1)
     }
 
+    func testBufferedOutputWithOutdatedLogs() {
+        output.writeResult = .failureRetryAfterNextResume
+        output.configuration.logEntryCountLimit = 10
+        output.configuration.flushInterval = 10
+        output.configuration.dropLogEntriesOlderThan = 30
+
+        let expectation = self.expectation(description: "async writing")
+        output.writeCallback = {
+            expectation.fulfill()
+        }
+        output.waitUntilCurrentCompletionBlock = { [weak self] in
+            self?.wait(for: [expectation], timeout: 1.0)
+        }
+
+        let keptLogs: Set<LogEntry> = Set((0..<5).map { _ in makeLog() })
+        let deletedLogs: Set<LogEntry> = Set((0..<5).map { _ in makeOutdatedLog() })
+        logStore.add(keptLogs.union(deletedLogs), for: "pv_TestingBufferedOutput", completion: nil)
+        XCTAssertEqual(logStore.logs(for: "pv_TestingBufferedOutput").count, 10)
+        XCTAssertEqual(output.calledWriteCount, 0)
+
+        output.resume()
+        output.waitUntilCurrentQueuedJobFinished()
+
+        XCTAssertEqual(logStore.logs(for: "pv_TestingBufferedOutput").count, 5)
+        XCTAssertEqual(logStore.logs(for: "pv_TestingBufferedOutput"), keptLogs)
+        XCTAssertEqual(output.calledWriteCount, 1)
+    }
+
     func testBufferedOutputFlushedByInterval() {
         output.configuration.logEntryCountLimit = 10
         output.configuration.flushInterval = 1
@@ -329,6 +408,45 @@ class BufferedOutputAsyncTests: XCTestCase {
         XCTAssertEqual(output.calledWriteCount, 4)
     }
 
+    func testRetryAfterNextResume() {
+        output.writeResult = .failureRetryAfterNextResume
+        output.configuration.logEntryCountLimit = 10
+        output.configuration.retryLimit = 1
+
+        var expectation = self.expectation(description: "async writing")
+        output.writeCallback = {
+            expectation.fulfill()
+        }
+        output.waitUntilCurrentCompletionBlock = { [weak self] in
+            self?.wait(for: [expectation], timeout: 5.0)
+        }
+
+        XCTAssertEqual(output.calledWriteCount, 0)
+        for _ in 0..<10 {
+            output.emit(log: makeLog())
+        }
+        output.waitUntilCurrentQueuedJobFinished()
+
+        XCTAssertEqual(output.calledWriteCount, 1)
+
+        output.writeCallback = {
+            XCTFail("retry should not have been attempted before resume")
+        }
+        sleep(2)
+
+        // Now test resume.
+        expectation = self.expectation(description: "resume writeChunk")
+        XCTAssertEqual(output.calledWriteCount, 1)
+        XCTAssertEqual(logStore.logs(for: "pv_TestingBufferedOutput").count, 10)
+        output.writeResult = .success
+        output.writeCallback = {
+            expectation.fulfill()
+        }
+        output.resume()
+        output.waitUntilCurrentQueuedJobFinished()
+        XCTAssertEqual(output.calledWriteCount, 2)
+    }
+
     func testParallelWrite() {
         output.configuration.logEntryCountLimit = 2
         output.configuration.retryLimit = 3
@@ -388,7 +506,7 @@ class BufferedOutputDispatchQueueTests: XCTestCase {
         dispatchQueue.async {
             let logStore = InMemoryLogStore()
             let output = TestingBufferedOutput(logStore: logStore, tagPattern: TagPattern(string: "pv")!)
-            output.configuration = BufferedOutput.Configuration(logEntryCountLimit: 5, flushInterval: 0, retryLimit: 3)
+            output.configuration = BufferedOutput.Configuration(logEntryCountLimit: 5, flushInterval: 0, retryLimit: 3, dropLogEntriesOlderThan: 120)
             output.start()
 
             output.emit(log: makeLog())
